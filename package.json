@@ -1,0 +1,20 @@
+{
+  "name": "homebridge-tesy-heater-v2",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for Tesy Heater (updated API)",
+  "main": "index.js",
+  "keywords": [
+    "homebridge-plugin",
+    "homebridge",
+    "tesy",
+    "heater"
+  ],
+  "engines": {
+    "node": ">=16.0.0",
+    "homebridge": ">=1.6.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "homebridge-http-base": "^1.0.0"
+  }
+}
