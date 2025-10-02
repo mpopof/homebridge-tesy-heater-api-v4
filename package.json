@@ -1,7 +1,7 @@
 {
-  "name": "homebridge-tesy-heater-v2",
-  "version": "2.0.0",
-  "description": "Homebridge plugin for Tesy Heater (updated API)",
+  "name": "homebridge-tesy-heater-api-v4",
+  "version": "0.0.1",
+  "description": "Homebridge plugin for Tesy Heater (updated APIv4)",
   "main": "index.js",
   "keywords": [
     "homebridge-plugin",
