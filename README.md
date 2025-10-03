@@ -1,15 +1,29 @@
 # homebridge-tesy-heater-api-v4
-this is a clone/upgrade to https://github.com/benov84/homebridge-tesy-heater#readme for the newer tesy api
 
-# Homebridge Tesy Heater (v2)
+Homebridge plugin for Tesy smart heaters using the `ad.mytesy.com/rest/old-app-*` endpoints.
+Uses axios with a cookie jar to capture `PHPSESSID` if the API does not return `acc_session`/`acc_alt` in JSON.
 
-Homebridge plugin for Tesy smart heaters using the new v4 API.
-
-## Installation
+## Install (local dev)
 
 ```bash
-#git clone https://github.com/YOUR-USERNAME/homebridge-tesy-heater.git
-git clone https://github.com/mpopof/homebridge-tesy-heater-api-v4
-cd homebridge-tesy-heater-api-v4
 npm install
 sudo npm link
+# then configure in Homebridge UI
+```
+
+## Config fields
+
+- **name**: display name in HomeKit
+- **device_id**: device identifier as used by Tesy API
+- **username / password**: Tesy account
+- **userid**: (optional) some accounts require it
+- **pullInterval**: status refresh period in ms (default 10000)
+- **minTemp / maxTemp**: bounds for target temperature
+
+## Notes
+
+- Requires Node 16+ and Homebridge 1.6+
+- Endpoints used:
+  - `https://ad.mytesy.com/rest/old-app-login`
+  - `https://ad.mytesy.com/rest/old-app-devices`
+  - `https://ad.mytesy.com/rest/old-app-set-device-status`

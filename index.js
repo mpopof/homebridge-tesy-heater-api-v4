@@ -1,4 +1,6 @@
 // index.js
+const { wrapper } = require("axios-cookiejar-support");
+const { CookieJar } = require("tough-cookie");
 const axios = require("axios");
 const _http_base = require("homebridge-http-base");
 const PullTimer = _http_base.PullTimer;
@@ -11,6 +13,23 @@ module.exports = function (homebridge) {
   // Keep the package name here in case you want to fully-qualify in config:
   homebridge.registerAccessory("homebridge-tesy-heater-api-v4", "TesyHeater", TesyHeater);
 };
+
+// Shared axios instance with cookie jar and browser-like headers
+const jar = new CookieJar();
+const api = wrapper(axios.create({
+  jar,
+  withCredentials: true,
+  timeout: 15000,
+  headers: {
+    "accept": "application/json, text/plain, */*",
+    "content-type": "application/json",
+    "origin": "https://v4.mytesy.com",
+    "referer": "https://v4.mytesy.com/",
+    "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "dnt": "1"
+  },
+  validateStatus: (s) => s >= 200 && s < 400
+}));
 
 class TesyHeater {
   constructor(log, config) {
@@ -36,7 +55,7 @@ class TesyHeater {
     // ---- HomeKit Service ----
     this.service = new Service.HeaterCooler(this.name);
 
-    // Default initial states so Home app doesn't show "No Response" before first refresh
+    // Default initial states
     this.service
       .getCharacteristic(Characteristic.CurrentHeaterCoolerState)
       .updateValue(Characteristic.CurrentHeaterCoolerState.INACTIVE);
@@ -105,7 +124,7 @@ class TesyHeater {
       .setCharacteristic(Characteristic.Model, this.model)
       .setCharacteristic(Characteristic.SerialNumber, this.device_id);
 
-    // ---- Timer (created now, started after login) ----
+    // ---- Timer ----
     this.pullTimer = new PullTimer(
       this.log,
       this.pullInterval,
@@ -118,10 +137,9 @@ class TesyHeater {
       this.authenticate()
         .then(() => {
           this.pullTimer.start();
-          // Do an immediate first refresh
           this.refreshTesyHeaterStatus();
         })
-        .catch((e) => {
+        .catch(() => {
           this.log.error("Initial authentication failed. Will still start timer and retry on next ticks.");
           this.pullTimer.start();
         });
@@ -156,38 +174,50 @@ class TesyHeater {
   }
 
   getTesyHeaterCurrentHeaterCoolerState(state) {
-    // READY = IDLE; otherwise assume heating when active
     if (!state) return Characteristic.CurrentHeaterCoolerState.INACTIVE;
     return state.toUpperCase() === "READY"
       ? Characteristic.CurrentHeaterCoolerState.IDLE
       : Characteristic.CurrentHeaterCoolerState.HEATING;
   }
 
-  // ---- API calls (axios) ----
+  // ---- API calls (axios + cookies) ----
   async authenticate() {
     try {
-      const { data } = await axios.post(
+      const resp = await api.post(
         "https://ad.mytesy.com/rest/old-app-login",
         {
           email: this.username,
           password: this.password,
-          userID: this.userid,
+          userID: this.userid || "",
           userEmail: this.username,
           userPass: this.password,
           lang: "en",
-        },
-        { headers: { "content-type": "application/json" }, timeout: 10000 }
+        }
       );
 
-      // Expected fields from Tesy "old-app" login:
-      this.session = data.acc_session || data.PHPSESSID || "";
-      this.alt = data.acc_alt || data.ALT || "";
+      const data = resp.data || {};
+      this.log.debug("Login response keys:", Object.keys(data));
 
-      if (!this.session || !this.alt) {
-        throw new Error("Missing session/alt in login response");
+      // Preferred (old behavior)
+      this.session = data.acc_session || data.PHPSESSID || "";
+      this.alt     = data.acc_alt || data.ALT || "";
+
+      // Fallback to cookies for PHPSESSID
+      if (!this.session) {
+        const cookies = await jar.getCookies("https://ad.mytesy.com/");
+        const phpsess = cookies.find(c => c.key.toUpperCase() === "PHPSESSID");
+        if (phpsess) this.session = phpsess.value;
       }
 
-      this.log.info("Authenticated to Tesy (old-app).");
+      if (!this.session) {
+        throw new Error("Missing session (neither JSON nor cookie contained PHPSESSID)");
+      }
+
+      if (!this.alt) {
+        this.log.warn("ALT not present in login response; will try to infer later.");
+      }
+
+      this.log.info("Authenticated (cookies + session captured).");
     } catch (error) {
       const msg = error?.response?.data || error.message;
       this.log.error("Authentication failed:", msg);
@@ -197,49 +227,48 @@ class TesyHeater {
 
   async refreshTesyHeaterStatus() {
     this.log.debug("Executing refreshTesyHeaterStatus");
-
-    // Avoid overlapping polls
     this.pullTimer.stop();
 
     try {
-      if (!this.session || !this.alt) {
-        this.log.warn("No session/alt yet; re-authenticating...");
+      if (!this.session) {
+        this.log.warn("No session yet; authenticating...");
         await this.authenticate();
       }
 
-      const { data } = await axios.post(
-        "https://ad.mytesy.com/rest/old-app-devices",
-        {
-          ALT: this.alt,
-          CURRENT_SESSION: null,
-          PHPSESSID: this.session,
-          last_login_username: this.username,
-          userID: this.userid,
-          userEmail: this.username,
-          userPass: this.password,
-          lang: "en",
-        },
-        { headers: { "content-type": "application/json" }, timeout: 10000 }
-      );
+      const payload = {
+        ALT: this.alt || undefined,
+        CURRENT_SESSION: null,
+        PHPSESSID: this.session,
+        last_login_username: this.username,
+        userID: this.userid || "",
+        userEmail: this.username,
+        userPass: this.password,
+        lang: "en"
+      };
 
-      if (!data?.device || Object.keys(data.device).length === 0) {
+      const resp = await api.post("https://ad.mytesy.com/rest/old-app-devices", payload);
+      const data = resp.data || {};
+      this.log.debug("Devices response top-level keys:", Object.keys(data));
+
+      if (!this.alt && (data.acc_alt || data.ALT)) {
+        this.alt = data.acc_alt || data.ALT;
+        this.log.info("Captured ALT from devices response.");
+      }
+
+      if (!data.device || Object.keys(data.device).length === 0) {
         throw new Error("No devices in response");
       }
 
       const firstKey = Object.keys(data.device)[0];
       const status = data.device[firstKey]?.DeviceStatus;
-
       if (!status) throw new Error("DeviceStatus missing");
 
       this.updateDeviceStatus(status);
     } catch (error) {
       const msg = error?.response?.data || error.message;
       this.log.error("Failed to refresh heater status:", msg);
-
-      // Set to INACTIVE on failure to avoid stale "active" UI
       try {
-        this.service
-          .getCharacteristic(Characteristic.Active)
+        this.service.getCharacteristic(Characteristic.Active)
           .updateValue(Characteristic.Active.INACTIVE);
       } catch (_) {}
     } finally {
@@ -248,7 +277,6 @@ class TesyHeater {
   }
 
   updateDeviceStatus(status) {
-    // Current temperature: status.gradus
     const newCurrentTemperature = parseFloat(status.gradus);
     const oldCurrentTemperature =
       this.service.getCharacteristic(Characteristic.CurrentTemperature).value;
@@ -269,7 +297,6 @@ class TesyHeater {
       );
     }
 
-    // Target temp: status.ref_gradus
     const newHeatingThresholdTemperature = parseFloat(status.ref_gradus);
     const oldHeatingThresholdTemperature =
       this.service.getCharacteristic(Characteristic.HeatingThresholdTemperature).value;
@@ -290,7 +317,6 @@ class TesyHeater {
       );
     }
 
-    // Power state: status.power_sw => "on" / "off"
     const newHeaterActiveStatus = this.getTesyHeaterActiveState(status.power_sw);
     const oldHeaterActiveStatus =
       this.service.getCharacteristic(Characteristic.Active).value;
@@ -309,7 +335,6 @@ class TesyHeater {
       );
     }
 
-    // Heating state: status.heater_state => READY / HEATING
     const newCurrentHeaterCoolerState = this.getTesyHeaterCurrentHeaterCoolerState(
       status.heater_state
     );
@@ -330,33 +355,27 @@ class TesyHeater {
 
   // ---- HomeKit characteristic handlers ----
   getActive(callback) {
-    // Return current cached value immediately
     try {
       const v = this.service.getCharacteristic(Characteristic.Active).value;
       callback(null, v);
     } catch (e) {
       callback(e);
     }
-
-    // Also trigger a background refresh (not blocking callback)
     this.refreshTesyHeaterStatus().catch(() => {});
   }
 
   async setActive(value, callback) {
     this.log.info("[+] Changing Active status to value:", value);
-
     this.pullTimer.stop();
     const newValue = value === 0 ? "off" : "on";
 
     try {
-      if (!this.session || !this.alt) {
-        await this.authenticate();
-      }
+      if (!this.session) await this.authenticate();
 
-      await axios.post(
+      await api.post(
         "https://ad.mytesy.com/rest/old-app-set-device-status",
         {
-          ALT: this.alt,
+          ALT: this.alt || undefined,
           CURRENT_SESSION: null,
           PHPSESSID: this.session,
           last_login_username: this.username,
@@ -364,15 +383,13 @@ class TesyHeater {
           apiVersion: "apiv1",
           command: "power_sw",
           value: newValue,
-          userID: this.userid,
+          userID: this.userid || "",
           userEmail: this.username,
           userPass: this.password,
           lang: "en",
-        },
-        { headers: { "content-type": "application/json" }, timeout: 10000 }
+        }
       );
 
-      // Optimistically update
       this.service
         .getCharacteristic(Characteristic.Active)
         .updateValue(value);
@@ -388,7 +405,6 @@ class TesyHeater {
   }
 
   getCurrentTemperature(callback) {
-    // Return cached value
     try {
       const v =
         this.service.getCharacteristic(Characteristic.CurrentTemperature).value;
@@ -396,8 +412,6 @@ class TesyHeater {
     } catch (e) {
       callback(e);
     }
-
-    // Kick a refresh to keep it warm
     this.refreshTesyHeaterStatus().catch(() => {});
   }
 
@@ -410,14 +424,12 @@ class TesyHeater {
     this.pullTimer.stop();
 
     try {
-      if (!this.session || !this.alt) {
-        await this.authenticate();
-      }
+      if (!this.session) await this.authenticate();
 
-      await axios.post(
+      await api.post(
         "https://ad.mytesy.com/rest/old-app-set-device-status",
         {
-          ALT: this.alt,
+          ALT: this.alt || undefined,
           CURRENT_SESSION: null,
           PHPSESSID: this.session,
           last_login_username: this.username,
@@ -425,15 +437,13 @@ class TesyHeater {
           apiVersion: "apiv1",
           command: "tmpT",
           value: v,
-          userID: this.userid,
+          userID: this.userid || "",
           userEmail: this.username,
           userPass: this.password,
           lang: "en",
-        },
-        { headers: { "content-type": "application/json" }, timeout: 10000 }
+        }
       );
 
-      // Optimistically update
       this.service
         .getCharacteristic(Characteristic.HeatingThresholdTemperature)
         .updateValue(v);
@@ -450,7 +460,6 @@ class TesyHeater {
 
   // ---- Services ----
   getServices() {
-    // Trigger an initial refresh (non-blocking)
     this.refreshTesyHeaterStatus().catch(() => {});
     return [this.informationService, this.service];
   }
